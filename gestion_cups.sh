@@ -1,61 +1,74 @@
 #!/bin/bash
 
 ################################################################################
-# Script: cups.sh
-# Descripción: Instalación y configuración automática de servidor CUPS
-# Autor: Adaptado para Amanhcc
+# SCRIPT DE INSTALACIÓN Y CONFIGURACIÓN TOTAL CUPS
+# Diseñado para: Automatización completa sin intervención manual.
 ################################################################################
 
-# --- 1. VERIFICACIÓN DE PRIVILEGIOS ---
-# El script necesita privilegios de root para instalar paquetes y editar /etc/
+# --- 1. VALIDACIÓN DE ENTORNO ---
 if [ "$EUID" -ne 0 ]; then
-  echo "[-] Error: Este script debe ejecutarse con sudo."
-  echo "Uso: sudo bash $0"
+  echo "[-] ERROR: Debes ejecutar este script con sudo."
+  echo "Comando: sudo bash $0"
   exit 1
 fi
 
-# Detectamos quién es el usuario real (no root) para darle permisos después
+# Detectar el usuario real detrás de sudo
 REAL_USER=${SUDO_USER:-$USER}
 
-echo "[+] Iniciando configuración del servidor de impresión CUPS..."
+echo "==============================================================="
+echo "   INICIANDO CONFIGURACIÓN AUTOMÁTICA DE SERVIDOR CUPS         "
+echo "==============================================================="
 
-# --- 2. INSTALACIÓN ---
-echo "[+] Actualizando repositorios e instalando CUPS..."
-apt-get update
-apt-get install -y cups
+# --- 2. INSTALACIÓN DE PAQUETES ---
+echo "[+] 1/6: Instalando paquetes y drivers universales..."
+apt-get update -y
+apt-get install -y cups cups-client cups-bsd printer-driver-all avahi-utils
 
-# --- 3. RESPALDO DE SEGURIDAD ---
-# Siempre es buena práctica guardar el original antes de editarlo con sed
-echo "[+] Creando copia de seguridad de /etc/cups/cupsd.conf"
+# --- 3. RESPALDO Y CONFIGURACIÓN DE RED ---
+echo "[+] 2/6: Configurando acceso remoto (puerto 631)..."
 cp /etc/cups/cupsd.conf /etc/cups/cupsd.conf.bak
 
-# --- 4. CONFIGURACIÓN DE RED (ACCESO REMOTO) ---
-echo "[+] Configurando acceso remoto en el puerto 631..."
-
-# Cambiamos la escucha de local a global
+# Modificar para que escuche en todas las interfaces y no solo local
 sed -i 's/Listen localhost:631/Port 631/' /etc/cups/cupsd.conf
+sed -i 's/Browsing Off/Browsing On/' /etc/cups/cupsd.conf
 
-# Permitimos acceso a las secciones principales (Raíz, Admin y Config)
-# Esto inserta 'Allow all' después de la línea 'Order allow,deny' en cada sección
-sed -i '/<Location \/>/,/<\/Location>/ s/Order allow,deny/Order allow,deny\n  Allow all/' /etc/cups/cupsd.conf
-sed -i '/<Location \/admin>/,/<\/Location>/ s/Order allow,deny/Order allow,deny\n  Allow all/' /etc/cups/cupsd.conf
-sed -i '/<Location \/conf>/,/<\/Location>/ s/Order allow,deny/Order allow,deny\n  Allow all/' /etc/cups/cupsd.conf
+# Abrir el acceso a las rutas críticas (Web, Admin, Config)
+# Usamos un bucle para inyectar "Allow all" en las etiquetas Location
+for loc in "/" "/admin" "/conf"; do
+    sed -i "/<Location $loc>/,/<\/Location>/ s/Order allow,deny/Order allow,deny\n  Allow all/" /etc/cups/cupsd.conf
+done
 
-# --- 5. PERMISOS DE USUARIO ---
-echo "[+] Añadiendo al usuario '$REAL_USER' al grupo lpadmin..."
+# --- 4. FIREWALL Y PROTOCOLOS DE RED ---
+echo "[+] 3/6: Abriendo puertos en Firewall y configurando mDNS..."
+if command -v ufw >/dev/null; then
+    ufw allow 631/tcp >/dev/null
+    ufw allow 5353/udp >/dev/null # Para que se vea en la red (Avahi)
+fi
+
+# --- 5. GESTIÓN DE PERMISOS ---
+echo "[+] 4/6: Otorgando permisos de administración a '$REAL_USER'..."
 usermod -aG lpadmin "$REAL_USER"
 
-# --- 6. REINICIO Y ACTIVACIÓN DEL SERVICIO ---
-echo "[+] Reiniciando el servicio CUPS para aplicar los cambios..."
+# Usar la herramienta oficial cupsctl para asegurar que todo esté activo
+cupsctl --remote-admin --remote-any --share-printers --user-cancel-any
+
+# --- 6. LANZAMIENTO DEL SERVICIO ---
+echo "[+] 5/6: Reiniciando servicios..."
 systemctl enable cups
 systemctl restart cups
+systemctl restart avahi-daemon # Para que aparezca en Windows/Mac automáticamente
 
-# --- 7. FINALIZACIÓN ---
+# --- 7. FINALIZACIÓN Y DIAGNÓSTICO ---
 IP_LOCAL=$(hostname -I | awk '{print $1}')
+echo "[+] 6/6: Generando reporte final..."
 
+echo "==============================================================="
+echo "             ¡CONFIGURACIÓN COMPLETADA!                        "
+echo "==============================================================="
+echo " > URL de administración: http://$IP_LOCAL:631"
+echo " > Usuario administrador: $REAL_USER"
+echo " > Estado del servicio: $(systemctl is-active cups)"
 echo "---------------------------------------------------------------"
-echo " ¡LISTO! El servidor CUPS debería estar funcionando."
-echo " Accede a la interfaz web aquí: http://$IP_LOCAL:631"
-echo "---------------------------------------------------------------"
-echo "NOTA: Si no puedes entrar a la administración, cierra sesión"
-echo "o reinicia el equipo para que los cambios de grupo surtan efecto."
+echo " NOTA: Si el panel web te pide usuario/contraseña, utiliza las"
+echo " credenciales de Linux de '$REAL_USER'."
+echo "==============================================================="
